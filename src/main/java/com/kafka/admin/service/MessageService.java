@@ -14,19 +14,23 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TopicPartitionInfo;
+import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
 
 @Service
 public class MessageService {
+
+    private static final Duration POLL_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration MAX_POLL_INTERVAL = Duration.ofMinutes(5);
 
     private final KafkaAdminClientFactory adminClientFactory;
     private final KafkaAdminConfig config;
@@ -50,10 +54,22 @@ public class MessageService {
             DescribeTopicsResult topicResult = admin.describeTopics(Collections.singletonList(topicName));
             TopicDescription topicDesc = topicResult.allTopicNames().get().get(topicName);
 
+            Map<TopicPartition, OffsetSpec> offsetSpecs = new HashMap<>();
             List<ConsumerOffsetResponse> responses = new ArrayList<>();
+
             for (TopicPartitionInfo tpInfo : topicDesc.partitions()) {
                 TopicPartition tp = new TopicPartition(topicName, tpInfo.partition());
-                ListOffsetsResult result = admin.listOffsets(Map.of(tp, OffsetSpec.latest()));
+                offsetSpecs.put(tp, OffsetSpec.latest());
+            }
+
+            if (offsetSpecs.isEmpty()) {
+                return responses;
+            }
+
+            ListOffsetsResult result = admin.listOffsets(offsetSpecs);
+
+            for (TopicPartitionInfo tpInfo : topicDesc.partitions()) {
+                TopicPartition tp = new TopicPartition(topicName, tpInfo.partition());
                 ListOffsetsResult.ListOffsetsResultInfo offsetInfo = result.partitionResult(tp).get();
 
                 ConsumerOffsetResponse response = new ConsumerOffsetResponse();
@@ -74,61 +90,268 @@ public class MessageService {
             @Nullable String password,
             @Nullable String saslMechanism) throws Exception {
 
+        Integer partition = request.getPartition();
+        Long offset = request.getOffset();
+        Long timestamp = request.getTimestamp();
+        String startingPosition = request.getStartingPosition();
+        Integer maxMessages = request.getMaxMessages() != null ? request.getMaxMessages() : 100;
+
+        if (timestamp != null) {
+            return fetchFromTimestamp(
+                    request.getTopic(),
+                    partition,
+                    timestamp,
+                    maxMessages,
+                    bootstrapServers,
+                    securityProtocol,
+                    username,
+                    password,
+                    saslMechanism);
+        }
+
+        if (offset != null) {
+            return fetchFromOffset(
+                    request.getTopic(),
+                    partition,
+                    offset,
+                    maxMessages,
+                    bootstrapServers,
+                    securityProtocol,
+                    username,
+                    password,
+                    saslMechanism);
+        }
+
+        if (startingPosition != null) {
+            if ("latest".equalsIgnoreCase(startingPosition)) {
+                return fetchFromOffset(
+                        request.getTopic(),
+                        partition,
+                        -1L,
+                        maxMessages,
+                        bootstrapServers,
+                        securityProtocol,
+                        username,
+                        password,
+                        saslMechanism);
+            }
+            return fetchFromOffset(
+                    request.getTopic(),
+                    partition,
+                    0L,
+                    maxMessages,
+                    bootstrapServers,
+                    securityProtocol,
+                    username,
+                    password,
+                    saslMechanism);
+        }
+
+        return fetchFromOffset(
+                request.getTopic(),
+                partition,
+                0L,
+                maxMessages,
+                bootstrapServers,
+                securityProtocol,
+                username,
+                password,
+                saslMechanism);
+    }
+
+    public List<MessageResponse> fetchFromOffset(
+            String topicName,
+            @Nullable Integer partition,
+            long startOffset,
+            int maxMessages,
+            String bootstrapServers,
+            @Nullable String securityProtocol,
+            @Nullable String username,
+            @Nullable String password,
+            @Nullable String saslMechanism) throws Exception {
+
+        List<TopicPartition> partitions = getPartitions(topicName, partition, bootstrapServers,
+                securityProtocol, username, password, saslMechanism);
+
         Properties props = createConsumerProperties(bootstrapServers, securityProtocol, username, password, saslMechanism);
         props.remove(ConsumerConfig.GROUP_ID_CONFIG);
-        
-        int maxMessages = request.getMaxMessages() != null ? request.getMaxMessages() : 100;
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxMessages);
 
         List<MessageResponse> messages = new ArrayList<>();
 
-        try (Admin admin = adminClientFactory.createAdminClient(
-                bootstrapServers, securityProtocol, username, password, saslMechanism);
-             KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-
-            DescribeTopicsResult topicResult = admin.describeTopics(Collections.singletonList(request.getTopic()));
-            TopicDescription topicDesc = topicResult.allTopicNames().get().get(request.getTopic());
-
-            List<TopicPartition> partitions = new ArrayList<>();
-            if (request.getPartition() != null) {
-                partitions.add(new TopicPartition(request.getTopic(), request.getPartition()));
-            } else {
-                for (TopicPartitionInfo tpInfo : topicDesc.partitions()) {
-                    partitions.add(new TopicPartition(request.getTopic(), tpInfo.partition()));
-                }
-            }
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+            consumer.assign(partitions);
 
             for (TopicPartition tp : partitions) {
-                consumer.assign(Collections.singletonList(tp));
+                long targetOffset = startOffset;
 
-                if (request.getOffset() != null) {
-                    consumer.seek(tp, request.getOffset());
-                } else if ("earliest".equalsIgnoreCase(request.getStartingPosition())) {
-                    consumer.seekToBeginning(Collections.singletonList(tp));
-                } else if ("latest".equalsIgnoreCase(request.getStartingPosition())) {
-                    consumer.seekToEnd(Collections.singletonList(tp));
+                if (startOffset < 0) {
                     long endOffset = consumer.position(tp);
-                    long startOffset = Math.max(0, endOffset - maxMessages);
-                    consumer.seek(tp, startOffset);
-                } else if (request.getTimestamp() != null) {
-                    ListOffsetsResult result = admin.listOffsets(Map.of(tp, OffsetSpec.forTimestamp(request.getTimestamp())));
-                    ListOffsetsResult.ListOffsetsResultInfo offsetInfo = result.partitionResult(tp).get();
-                    consumer.seek(tp, offsetInfo.offset());
+                    targetOffset = Math.max(0, endOffset - maxMessages);
+                }
+
+                consumer.seek(tp, targetOffset);
+            }
+
+            messages = pollMessages(consumer, new HashSet<>(partitions), maxMessages);
+        }
+
+        return messages;
+    }
+
+    public List<MessageResponse> fetchFromTimestamp(
+            String topicName,
+            @Nullable Integer partition,
+            long timestamp,
+            int maxMessages,
+            String bootstrapServers,
+            @Nullable String securityProtocol,
+            @Nullable String username,
+            @Nullable String password,
+            @Nullable String saslMechanism) throws Exception {
+
+        List<TopicPartition> partitions = getPartitions(topicName, partition, bootstrapServers,
+                securityProtocol, username, password, saslMechanism);
+
+        Map<TopicPartition, Long> startOffsets = getStartOffsetsByTimestamp(
+                partitions, timestamp, bootstrapServers,
+                securityProtocol, username, password, saslMechanism);
+
+        Properties props = createConsumerProperties(bootstrapServers, securityProtocol, username, password, saslMechanism);
+        props.remove(ConsumerConfig.GROUP_ID_CONFIG);
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxMessages);
+
+        List<MessageResponse> messages = new ArrayList<>();
+
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+            consumer.assign(partitions);
+
+            for (TopicPartition tp : partitions) {
+                Long offset = startOffsets.get(tp);
+                if (offset != null && offset >= 0) {
+                    consumer.seek(tp, offset);
                 } else {
                     consumer.seekToBeginning(Collections.singletonList(tp));
                 }
+            }
 
-                ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(10));
-                for (ConsumerRecord<String, String> record : records) {
-                    MessageResponse response = new MessageResponse();
-                    response.setTopic(record.topic());
-                    response.setPartition(record.partition());
-                    response.setOffset(record.offset());
-                    response.setTimestamp(record.timestamp());
-                    response.setKey(record.key());
-                    response.setValue(record.value());
-                    messages.add(response);
+            messages = pollMessages(consumer, new HashSet<>(partitions), maxMessages);
+        }
+
+        return messages;
+    }
+
+    public List<MessageResponse> fetchEarliest(
+            String topicName,
+            @Nullable Integer partition,
+            int maxMessages,
+            String bootstrapServers,
+            @Nullable String securityProtocol,
+            @Nullable String username,
+            @Nullable String password,
+            @Nullable String saslMechanism) throws Exception {
+
+        return fetchFromOffset(topicName, partition, 0L, maxMessages,
+                bootstrapServers, securityProtocol, username, password, saslMechanism);
+    }
+
+    public List<MessageResponse> fetchLatest(
+            String topicName,
+            @Nullable Integer partition,
+            int maxMessages,
+            String bootstrapServers,
+            @Nullable String securityProtocol,
+            @Nullable String username,
+            @Nullable String password,
+            @Nullable String saslMechanism) throws Exception {
+
+        return fetchFromOffset(topicName, partition, -1L, maxMessages,
+                bootstrapServers, securityProtocol, username, password, saslMechanism);
+    }
+
+    private List<TopicPartition> getPartitions(
+            String topicName,
+            @Nullable Integer partition,
+            String bootstrapServers,
+            @Nullable String securityProtocol,
+            @Nullable String username,
+            @Nullable String password,
+            @Nullable String saslMechanism) throws ExecutionException, InterruptedException {
+
+        try (Admin admin = adminClientFactory.createAdminClient(
+                bootstrapServers, securityProtocol, username, password, saslMechanism)) {
+
+            DescribeTopicsResult topicResult = admin.describeTopics(Collections.singletonList(topicName));
+            TopicDescription topicDesc = topicResult.allTopicNames().get().get(topicName);
+
+            List<TopicPartition> partitions = new ArrayList<>();
+            if (partition != null) {
+                partitions.add(new TopicPartition(topicName, partition));
+            } else {
+                for (TopicPartitionInfo tpInfo : topicDesc.partitions()) {
+                    partitions.add(new TopicPartition(topicName, tpInfo.partition()));
                 }
+            }
+            return partitions;
+        }
+    }
+
+    private Map<TopicPartition, Long> getStartOffsetsByTimestamp(
+            List<TopicPartition> partitions,
+            long timestamp,
+            String bootstrapServers,
+            @Nullable String securityProtocol,
+            @Nullable String username,
+            @Nullable String password,
+            @Nullable String saslMechanism) throws Exception {
+
+        try (Admin admin = adminClientFactory.createAdminClient(
+                bootstrapServers, securityProtocol, username, password, saslMechanism)) {
+
+            Map<TopicPartition, OffsetSpec> offsetSpecs = new HashMap<>();
+            for (TopicPartition tp : partitions) {
+                offsetSpecs.put(tp, OffsetSpec.forTimestamp(timestamp));
+            }
+
+            ListOffsetsResult result = admin.listOffsets(offsetSpecs);
+
+            Map<TopicPartition, Long> startOffsets = new HashMap<>();
+
+            for (TopicPartition tp : partitions) {
+                ListOffsetsResult.ListOffsetsResultInfo info = result.partitionResult(tp).get();
+                startOffsets.put(tp, info.offset());
+            }
+            return startOffsets;
+        }
+    }
+
+    private List<MessageResponse> pollMessages(
+            KafkaConsumer<String, String> consumer,
+            Set<TopicPartition> partitions,
+            int maxMessages) {
+
+        List<MessageResponse> messages = new ArrayList<>();
+
+        while (messages.size() < maxMessages) {
+            ConsumerRecords<String, String> records = consumer.poll(POLL_TIMEOUT);
+
+            if (records.isEmpty()) {
+                break;
+            }
+
+            for (ConsumerRecord<String, String> record : records) {
+                if (messages.size() >= maxMessages) {
+                    break;
+                }
+
+                MessageResponse response = new MessageResponse();
+                response.setTopic(record.topic());
+                response.setPartition(record.partition());
+                response.setOffset(record.offset());
+                response.setTimestamp(record.timestamp());
+                response.setKey(record.key());
+                response.setValue(record.value());
+                messages.add(response);
             }
         }
 
@@ -146,29 +369,9 @@ public class MessageService {
         Properties props = createProducerProperties(bootstrapServers, securityProtocol, username, password, saslMechanism);
 
         int count = 0;
-        try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+        try (@SuppressWarnings("deprecation") KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
             for (ProduceMessagesRequest.ProducerRecord record : request.getRecords()) {
-                ProducerRecord<String, String> producerRecord;
-                
-                if (record.getHeaders() != null && !record.getHeaders().isEmpty()) {
-                    var headers = new RecordHeaders();
-                    record.getHeaders().forEach((key, value) -> headers.add(key, value.getBytes()));
-                    
-                    if (request.getPartition() != null) {
-                        producerRecord = new ProducerRecord<>(request.getTopic(), request.getPartition(), 
-                                record.getTimestamp(), record.getKey(), record.getValue(), headers);
-                    } else {
-                        producerRecord = new ProducerRecord<>(request.getTopic(), null, 
-                                record.getTimestamp(), record.getKey(), record.getValue(), headers);
-                    }
-                } else {
-                    if (request.getPartition() != null) {
-                        producerRecord = new ProducerRecord<>(request.getTopic(), request.getPartition(), 
-                                record.getTimestamp(), record.getKey(), record.getValue());
-                    } else {
-                        producerRecord = new ProducerRecord<>(request.getTopic(), record.getKey(), record.getValue());
-                    }
-                }
+                var producerRecord = createProducerRecord(request, record);
                 producer.send(producerRecord);
                 count++;
             }
@@ -178,21 +381,50 @@ public class MessageService {
         return count;
     }
 
-    private Properties createConsumerProperties(String bootstrapServers, String securityProtocol, 
+    private ProducerRecord<String, String> createProducerRecord(
+            ProduceMessagesRequest request, ProduceMessagesRequest.ProducerRecord record) {
+
+        if (record.getHeaders() != null && !record.getHeaders().isEmpty()) {
+            var headers = new RecordHeaders();
+            record.getHeaders().forEach((key, value) -> headers.add(key, value.getBytes()));
+
+            if (request.getPartition() != null) {
+                return new ProducerRecord<>(
+                        request.getTopic(), request.getPartition(),
+                        record.getKey(), record.getValue(), headers);
+            } else {
+                return new ProducerRecord<>(
+                        request.getTopic(), null,
+                        record.getKey(), record.getValue(), headers);
+            }
+        } else {
+            if (request.getPartition() != null) {
+                return new ProducerRecord<>(
+                        request.getTopic(), request.getPartition(),
+                        record.getKey(), record.getValue());
+            } else {
+                return new ProducerRecord<>(
+                        request.getTopic(), record.getKey(), record.getValue());
+            }
+        }
+    }
+
+    private Properties createConsumerProperties(String bootstrapServers, String securityProtocol,
             String username, String password, String saslMechanism) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "kafka-admin-consumer");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "kafka-admin-consumer-" + UUID.randomUUID());
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, (int) MAX_POLL_INTERVAL.toMillis());
 
         applySecurityProperties(props, bootstrapServers, securityProtocol, username, password, saslMechanism);
         return props;
     }
 
-    private Properties createProducerProperties(String bootstrapServers, String securityProtocol, 
+    private Properties createProducerProperties(String bootstrapServers, String securityProtocol,
             String username, String password, String saslMechanism) {
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -206,7 +438,7 @@ public class MessageService {
 
     private void applySecurityProperties(Properties props, String bootstrapServers, String securityProtocol,
             String username, String password, String saslMechanism) {
-        
+
         if (securityProtocol == null) {
             securityProtocol = config.getDefaultSecurityProtocol();
         }
@@ -219,12 +451,12 @@ public class MessageService {
         if (password == null) {
             password = config.getDefaultPassword();
         }
-        
+
         props.put("security.protocol", securityProtocol);
-        
+
         if (securityProtocol.equals("SASL_PLAINTEXT") || securityProtocol.equals("SASL_SSL")) {
             props.put("sasl.mechanism", saslMechanism);
-            
+
             if (username != null && password != null) {
                 if ("PLAIN".equalsIgnoreCase(saslMechanism)) {
                     props.put("sasl.jaas.config", "org.apache.kafka.common.security.plain.PlainLoginModule required " +
@@ -235,10 +467,5 @@ public class MessageService {
                 }
             }
         }
-    }
-
-    private Admin createAdminClient(String bootstrapServers, String securityProtocol,
-            String username, String password, String saslMechanism) {
-        return adminClientFactory.createAdminClient(bootstrapServers, securityProtocol, username, password, saslMechanism);
     }
 }

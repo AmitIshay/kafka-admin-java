@@ -40,8 +40,54 @@ public class MessageController {
                 ctx.username(), ctx.password(), ctx.saslMechanism());
     }
 
+    @GetMapping("/topic/{topicName}/earliest")
+    @Operation(summary = "Fetch earliest messages", description = "Fetch messages from the earliest offset")
+    public List<MessageResponse> fetchEarliest(
+            @Parameter(description = "Topic name") @PathVariable String topicName,
+            @Parameter(description = "Partition number") @RequestParam(required = false) Integer partition,
+            @Parameter(description = "Maximum messages to fetch") @RequestParam(required = false, defaultValue = "100") Integer maxMessages,
+            @Parameter(description = "Bootstrap servers") @RequestParam(required = false) String bootstrapServers,
+            HttpServletRequest request) throws Exception {
+
+        var ctx = contextExtractor.extract(request);
+        return messageService.fetchEarliest(topicName, partition, maxMessages,
+                ctx.bootstrapServers(), ctx.securityProtocol(),
+                ctx.username(), ctx.password(), ctx.saslMechanism());
+    }
+
+    @GetMapping("/topic/{topicName}/latest")
+    @Operation(summary = "Fetch latest messages", description = "Fetch messages from the latest offset backwards")
+    public List<MessageResponse> fetchLatest(
+            @Parameter(description = "Topic name") @PathVariable String topicName,
+            @Parameter(description = "Partition number") @RequestParam(required = false) Integer partition,
+            @Parameter(description = "Maximum messages to fetch") @RequestParam(required = false, defaultValue = "100") Integer maxMessages,
+            @Parameter(description = "Bootstrap servers") @RequestParam(required = false) String bootstrapServers,
+            HttpServletRequest request) throws Exception {
+
+        var ctx = contextExtractor.extract(request);
+        return messageService.fetchLatest(topicName, partition, maxMessages,
+                ctx.bootstrapServers(), ctx.securityProtocol(),
+                ctx.username(), ctx.password(), ctx.saslMechanism());
+    }
+
+    @GetMapping("/topic/{topicName}/by-timestamp")
+    @Operation(summary = "Fetch messages by timestamp", description = "Fetch messages starting from a timestamp")
+    public List<MessageResponse> fetchFromTimestamp(
+            @Parameter(description = "Topic name") @PathVariable String topicName,
+            @Parameter(description = "Partition number") @RequestParam(required = false) Integer partition,
+            @Parameter(description = "Timestamp in milliseconds") @RequestParam Long timestamp,
+            @Parameter(description = "Maximum messages to fetch") @RequestParam(required = false, defaultValue = "100") Integer maxMessages,
+            @Parameter(description = "Bootstrap servers") @RequestParam(required = false) String bootstrapServers,
+            HttpServletRequest request) throws Exception {
+
+        var ctx = contextExtractor.extract(request);
+        return messageService.fetchFromTimestamp(topicName, partition, timestamp, maxMessages,
+                ctx.bootstrapServers(), ctx.securityProtocol(),
+                ctx.username(), ctx.password(), ctx.saslMechanism());
+    }
+
     @PostMapping("/fetch")
-    @Operation(summary = "Fetch messages", description = "Fetch messages from a topic")
+    @Operation(summary = "Fetch messages", description = "Fetch messages from a topic (legacy endpoint)")
     public List<MessageResponse> fetchMessages(
             @Valid @RequestBody FetchMessagesRequest fetchRequest,
             @Parameter(description = "Bootstrap servers") @RequestParam(required = false) String bootstrapServers,
