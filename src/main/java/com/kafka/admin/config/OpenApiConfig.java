@@ -31,11 +31,6 @@ public class OpenApiConfig {
                         .description("REST API for managing Kafka cluster operations including topics, users, quotas, ACLs, and cluster linking")
                         .contact(new Contact()
                                 .name("Kafka Admin Team")
-                                .email("admin@kafka.local")))
-                .servers(List.of(
-                        new Server()
-                                .url("http://localhost:" + serverPort)
-                                .description("Local development server")
-                ));
+                                .email("admin@kafka.local")));
     }
 }
