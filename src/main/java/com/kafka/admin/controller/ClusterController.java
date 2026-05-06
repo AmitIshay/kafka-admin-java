@@ -1,6 +1,5 @@
 package com.kafka.admin.controller;
 
-import com.kafka.admin.model.response.ApiResponse;
 import com.kafka.admin.model.response.ClusterMetadataResponse;
 import com.kafka.admin.service.ClusterService;
 import io.swagger.v3.oas.annotations.Operation;

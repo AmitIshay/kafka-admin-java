@@ -2,15 +2,12 @@ package com.kafka.admin.service;
 
 import com.kafka.admin.client.KafkaAdminClientFactory;
 import com.kafka.admin.model.request.CreateClusterLinkRequest;
-import com.kafka.admin.model.request.CreateMirrorTopicsRequest;
 import org.apache.kafka.clients.admin.ConfluentAdmin;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
-import java.util.Collections;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.ArgumentMatchers.any;

@@ -1,7 +1,6 @@
 package com.kafka.admin.model.request;
 
 import jakarta.validation.constraints.NotBlank;
-import java.util.List;
 
 public class CreateAclRequest {
 

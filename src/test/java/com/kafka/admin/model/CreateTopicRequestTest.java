@@ -3,7 +3,6 @@ package com.kafka.admin.model;
 import com.kafka.admin.model.request.*;
 import org.junit.jupiter.api.Test;
 
-import java.util.Arrays;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
